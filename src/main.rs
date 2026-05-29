@@ -1,4 +1,6 @@
+use std::fmt::format;
 use std::fs;
+use std::path::Path;
 use std::{
     clone,
     collections::{HashMap, HashSet},
@@ -164,66 +166,72 @@ fn pure_propagate(l: i64, mut problem: Problem) -> Problem {
     return problem;
 }
 
-fn dpll(mut problem: Problem) -> (bool, Problem) {
-    // problem.depth += 1;
+struct DPLL {}
 
-    loop {
-        let unit = find_unit(&problem);
-        if unit == 0 {
-            break;
+impl DPLL {
+    fn dpll(&mut self, mut problem: Problem) -> (bool, Problem) {
+        // problem.depth += 1;
+
+        loop {
+            let unit = find_unit(&problem);
+            if unit == 0 {
+                break;
+            }
+
+            problem = unit_propagate(unit, problem);
         }
 
-        problem = unit_propagate(unit, problem);
-    }
+        loop {
+            let pure = find_pure(&problem);
+            if pure == 0 {
+                break;
+            }
 
-    loop {
-        let pure = find_pure(&problem);
-        if pure == 0 {
-            break;
+            problem = pure_propagate(pure, problem);
         }
 
-        problem = pure_propagate(pure, problem);
-    }
-
-    if problem.clauses.is_empty() {
-        // println!("{:?}", (problem.decision_trail, problem.unit_trail, problem.pure_trail));
-        return (true, problem);
-    }
-    for (_, c) in &problem.clauses {
-        if c.is_empty() {
+        if problem.clauses.is_empty() {
             // println!("{:?}", (problem.decision_trail, problem.unit_trail, problem.pure_trail));
-            return (false, problem);
+            return (true, problem);
         }
-    }
+        for (_, c) in &problem.clauses {
+            if c.is_empty() {
+                // println!("{:?}", (problem.decision_trail, problem.unit_trail, problem.pure_trail));
+                return (false, problem);
+            }
+        }
 
-    let l = problem.literals.keys().next().unwrap();
-    let mut problem_clone = problem.clone();
-    problem_clone.insert_clause(HashSet::from_iter(vec![*l]));
-    problem_clone.trails[0].push((*l, problem.depth));
-    let positive_result = dpll(problem_clone);
-    if positive_result.0 {
-        return positive_result;
-    } else {
+        let l = problem.literals.keys().next().unwrap();
         let mut problem_clone = problem.clone();
-        problem_clone.insert_clause(HashSet::from_iter(vec![-*l]));
-        problem_clone.trails[0].push((-*l, problem.depth));
-        return dpll(problem_clone);
+        problem_clone.insert_clause(HashSet::from_iter(vec![*l]));
+        problem_clone.trails[0].push((*l, problem.depth));
+        let positive_result = self.dpll(problem_clone);
+        if positive_result.0 {
+            return positive_result;
+        } else {
+            let mut problem_clone = problem.clone();
+            problem_clone.insert_clause(HashSet::from_iter(vec![-*l]));
+            problem_clone.trails[0].push((-*l, problem.depth));
+            return self.dpll(problem_clone);
+        }
     }
 }
 
-fn go_over_all_problems(dir: String) {
-    let paths = fs::read_dir(dir).unwrap();
-    for path in paths {
-        print!("{:?} | ", path.as_ref().unwrap().path().to_str().unwrap());
-        // println!("{:?}", path.unwrap().file_name());
-        let problem = read_cnf(path.as_ref().unwrap().path().to_str().unwrap());
-        let (sat, dpll_result) = dpll(problem.clone());
-        let verification = verify_trail(problem, dpll_result.trails);
+fn go_over_all_problems() {
+    let mut dpll = DPLL {};
 
-        println!("{:?}", verification);
+    let problem_sets = fs::read_dir("problem_sets").unwrap();
+    for problem_set in problem_sets {
+        let problem_set = fs::read_dir(problem_set.unwrap().path()).unwrap();
+        for problem in problem_set {
+            let problem = problem.unwrap().path();
+            
+            let problem = read_cnf(problem.to_str().unwrap());
+            println!("{:?}", problem);
+        }
     }
 }
 
 fn main() {
-    go_over_all_problems("uf20-91".to_string());
+    go_over_all_problems();
 }
