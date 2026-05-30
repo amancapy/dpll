@@ -1,16 +1,14 @@
-use std::fmt::format;
-use std::fs;
-use std::path::Path;
-use std::{
-    clone,
-    collections::{HashMap, HashSet},
-    os::unix::process,
-};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{fs, io};
+
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 #[derive(Debug, Clone)]
-struct Problem {
-    clauses: HashMap<u64, HashSet<i64>>,
-    literals: HashMap<i64, HashSet<u64>>,
+struct ProblemState {
+    clauses: BTreeMap<u64, BTreeSet<i64>>,
+    literals: BTreeMap<i64, BTreeSet<u64>>,
 
     clause_counter: u64,
 
@@ -19,8 +17,8 @@ struct Problem {
     depth: u64,
 }
 
-impl Problem {
-    fn insert_clause(&mut self, clause: HashSet<i64>) {
+impl ProblemState {
+    fn insert_clause(&mut self, clause: BTreeSet<i64>) {
         for var in &clause {
             self.literals
                 .get_mut(var)
@@ -32,7 +30,7 @@ impl Problem {
     }
 }
 
-fn read_cnf(file_path: &str) -> Problem {
+fn read_cnf(file_path: &str) -> ProblemState {
     let contents = fs::read_to_string(file_path).expect("Couldn't read from file_path {file_path}");
     let contents = contents.split("cnf").collect::<Vec<&str>>();
     let contents = *contents.last().unwrap();
@@ -45,13 +43,13 @@ fn read_cnf(file_path: &str) -> Problem {
     let (num_vars, num_clauses) = (contents[0], contents[1]);
     let _ = contents.remove(0) & contents.remove(0);
 
-    let mut problem: Problem = Problem {
-        clauses: HashMap::new(),
-        literals: HashMap::from_iter(
+    let mut problem: ProblemState = ProblemState {
+        clauses: BTreeMap::new(),
+        literals: BTreeMap::from_iter(
             (-num_vars..=num_vars)
                 .into_iter()
                 .filter(|x| x != &0)
-                .map(|i| (i, HashSet::new())),
+                .map(|i| (i, BTreeSet::new())),
         ),
         clause_counter: 0,
 
@@ -60,7 +58,7 @@ fn read_cnf(file_path: &str) -> Problem {
         depth: 0,
     };
 
-    let mut clause = HashSet::new();
+    let mut clause = BTreeSet::new();
     for x in contents.iter_mut() {
         if x != &0 {
             clause.insert(x.clone());
@@ -81,8 +79,8 @@ fn read_cnf(file_path: &str) -> Problem {
     return problem;
 }
 
-fn verify_trail(problem: Problem, trails: [Vec<(i64, u64)>; 3]) -> bool {
-    let assignments: HashSet<i64> = HashSet::from_iter(
+fn verify_trail(problem: ProblemState, trails: [Vec<(i64, u64)>; 3]) -> bool {
+    let assignments: BTreeSet<i64> = BTreeSet::from_iter(
         [trails[1].clone(), trails[2].clone()]
             .concat()
             .into_iter()
@@ -109,7 +107,7 @@ fn verify_trail(problem: Problem, trails: [Vec<(i64, u64)>; 3]) -> bool {
     return true;
 }
 
-fn find_unit(problem: &Problem) -> i64 {
+fn find_unit(problem: &ProblemState) -> i64 {
     for (_, c) in problem.clauses.iter() {
         if c.len() == 1 {
             return *c.iter().next().unwrap();
@@ -118,7 +116,7 @@ fn find_unit(problem: &Problem) -> i64 {
     return 0;
 }
 
-fn unit_propagate(l: i64, mut problem: Problem) -> Problem {
+fn unit_propagate(l: i64, mut problem: ProblemState) -> ProblemState {
     for cidx in problem.literals.get_mut(&l).cloned().unwrap() {
         let removed_clause = problem.clauses.remove(&cidx).unwrap();
         for literal in removed_clause {
@@ -138,7 +136,7 @@ fn unit_propagate(l: i64, mut problem: Problem) -> Problem {
     return problem;
 }
 
-fn find_pure(problem: &Problem) -> i64 {
+fn find_pure(problem: &ProblemState) -> i64 {
     for l in problem.literals.keys() {
         if problem.literals.get(&-l).unwrap().is_empty() {
             return *l;
@@ -147,7 +145,7 @@ fn find_pure(problem: &Problem) -> i64 {
     return 0;
 }
 
-fn pure_propagate(l: i64, mut problem: Problem) -> Problem {
+fn pure_propagate(l: i64, mut problem: ProblemState) -> ProblemState {
     for lc in [l, -l] {
         {
             for cidx in problem.literals.get_mut(&lc).cloned().unwrap() {
@@ -166,11 +164,24 @@ fn pure_propagate(l: i64, mut problem: Problem) -> Problem {
     return problem;
 }
 
-struct DPLL {}
+struct DPLL {
+    nodes: Arc<Mutex<u64>>,
+    max_depth: Arc<Mutex<u64>>,
+}
 
 impl DPLL {
-    fn dpll(&mut self, mut problem: Problem) -> (bool, Problem) {
-        // problem.depth += 1;
+    fn dpll(&self, mut problem: ProblemState) -> (bool, ProblemState) {
+        *self.nodes.lock().unwrap() += 1;
+        print!(
+            "\rNodes explored: {}, Max depth reached: {} ",
+            *self.nodes.lock().unwrap(),
+            *self.max_depth.lock().unwrap()
+        );
+
+        problem.depth += 1;
+        if problem.depth > *self.max_depth.lock().unwrap() {
+            *self.max_depth.lock().unwrap() = problem.depth;
+        }
 
         loop {
             let unit = find_unit(&problem);
@@ -202,32 +213,78 @@ impl DPLL {
         }
 
         let l = problem.literals.keys().next().unwrap();
-        let mut problem_clone = problem.clone();
-        problem_clone.insert_clause(HashSet::from_iter(vec![*l]));
-        problem_clone.trails[0].push((*l, problem.depth));
-        let positive_result = self.dpll(problem_clone);
-        if positive_result.0 {
-            return positive_result;
+
+        // self.pool.join(oper_a, oper_b);
+
+        let results: Vec<(bool, ProblemState)> = [1, -1]
+            .into_par_iter()
+            .map(|sign| {
+                let l = *l * sign;
+                let mut problem_clone = problem.clone();
+                problem_clone.insert_clause(BTreeSet::from_iter(vec![l]));
+                problem_clone.trails[0].push((l, problem.depth));
+                self.dpll(problem_clone)
+            })
+            .collect::<Vec<(bool, ProblemState)>>();
+
+        if results.clone()[0].0 {
+            return results[0].clone();
         } else {
-            let mut problem_clone = problem.clone();
-            problem_clone.insert_clause(HashSet::from_iter(vec![-*l]));
-            problem_clone.trails[0].push((-*l, problem.depth));
-            return self.dpll(problem_clone);
+            return results[1].clone();
         }
     }
 }
 
 fn go_over_all_problems() {
-    let mut dpll = DPLL {};
+    for num_threads in 11..=12 {
+        let mut wtr = csv::Writer::from_writer(io::stdout());
+        wtr.write_record([
+            "problem_name",
+            "decision_type",
+            "max_depth",
+            "num_nodes",
+            "duration_ms",
+        ]);
 
-    let problem_sets = fs::read_dir("problem_sets").unwrap();
-    for problem_set in problem_sets {
-        let problem_set = fs::read_dir(problem_set.unwrap().path()).unwrap();
-        for problem in problem_set {
-            let problem = problem.unwrap().path();
-            
-            let problem = read_cnf(problem.to_str().unwrap());
-            println!("{:?}", problem);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build_global()
+            .unwrap();
+
+        let problem_sets = fs::read_dir("problem_sets").unwrap();
+        for problem_set in problem_sets {
+            if vec!["uf225-960", "uf200-860"]
+                .contains(&problem_set.as_ref().unwrap().file_name().to_str().unwrap())
+            {
+                continue;
+            }
+
+            let problem_set = fs::read_dir(problem_set.unwrap().path()).unwrap();
+            println!("Problem set {:?}", problem_set);
+
+            for problem in problem_set {
+                let start_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+
+                let dpll = DPLL {
+                    max_depth: Arc::new(Mutex::new(0)),
+                    nodes: Arc::new(Mutex::new(0)),
+                };
+
+                let problem_file = problem.unwrap().path();
+                print!("{:?}: \n", problem_file);
+                let problem = read_cnf(problem_file.to_str().unwrap());
+                let (sat, dpll_result) = dpll.dpll(problem.clone());
+                if sat {
+                    let verification = verify_trail(problem, dpll_result.trails);
+
+                    print!("{:?}", verification);
+                } else {
+                    println!("claimed not sat");
+                }
+
+                let end_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+                print!(" {:?}ms\n", end_time.as_millis() - start_time.as_millis());
+            }
         }
     }
 }
