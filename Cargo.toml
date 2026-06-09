@@ -7,3 +7,6 @@ edition = "2024"
 csv = "1.4.0"
 itertools = "0.14.0"
 rayon = "1.12.0"
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-Clink-arg=-Wl,--no-rosegment"]

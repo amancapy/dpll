@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::Ordering::{Relaxed, SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, io};
@@ -8,19 +10,19 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 #[derive(Debug, Clone)]
 // is only a single node in the recursion tree, does not in general (except the root node) represent the original problem
 struct ProblemState {
-    clauses: BTreeMap<u64, BTreeSet<i64>>, // indexed by u64, is a collection of literal names i64s
-    literals: BTreeMap<i64, BTreeSet<u64>>, // named by i64, is a collection of indexes into 'clauses'
+    clauses: BTreeMap<usize, BTreeSet<isize>>, // indexed by usize, is a collection of literal names isizes
+    literals: BTreeMap<isize, BTreeSet<usize>>, // named by isize, is a collection of indexes into 'clauses'
 
-    clause_counter: u64, // for the dynamic adding of clauses; only increases; dead indices stay dead
+    clause_counter: usize, // for the dynamic adding of clauses; only increases; dead indices stay dead
 
-    trails: [Vec<(i64, u64)>; 3], // trails of forced assignments (pure, unit) or decisions (heuristic) along a rollout in the recursive search tree
+    trails: [Vec<(isize, usize)>; 2], // trails of forced assignments (pure, unit) or decisions (heuristic) along a rollout in the recursive search tree
 
-    depth: u64,
+    depth: usize,
 }
 
 impl ProblemState {
     // dynamic insertion of clauses; not meaningful if cdcl is not implemented
-    fn insert_clause(&mut self, clause: BTreeSet<i64>) {
+    fn insert_clause(&mut self, clause: BTreeSet<isize>) {
         for var in &clause {
             self.literals
                 .get_mut(var)
@@ -33,7 +35,7 @@ impl ProblemState {
 }
 
 // reading a dimac .cnf file into a root node
-fn read_cnf(file_path: &str) -> ProblemState {
+fn read_cnf(file_path: &str) -> (ProblemState, usize, usize) {
     let contents = fs::read_to_string(file_path).expect("Couldn't read from file_path {file_path}");
     let contents = contents.split("cnf").collect::<Vec<&str>>();
     let contents = *contents.last().unwrap();
@@ -41,10 +43,11 @@ fn read_cnf(file_path: &str) -> ProblemState {
     let mut contents = contents
         .into_iter()
         .filter_map(|x| x.parse().ok())
-        .collect::<Vec<i64>>();
+        .collect::<Vec<isize>>();
 
     let (num_vars, num_clauses) = (contents[0], contents[1]);
-    let _ = contents.remove(0) & contents.remove(0);
+    contents.remove(0);
+    contents.remove(0);
 
     let mut problem: ProblemState = ProblemState {
         clauses: BTreeMap::new(),
@@ -56,7 +59,7 @@ fn read_cnf(file_path: &str) -> ProblemState {
         ),
         clause_counter: 0,
 
-        trails: [vec![], vec![], vec![]],
+        trails: [vec![], vec![]],
 
         depth: 0,
     };
@@ -79,17 +82,17 @@ fn read_cnf(file_path: &str) -> ProblemState {
         "Found {} clauses, expected {num_clauses} clauses.",
         problem.clauses.len()
     );
-    return problem;
+    return (problem, num_vars as usize, num_clauses as usize);
 }
 
 // sanity, checks the trail if sat, if DPLL claims sat
-fn verify_trail(problem_state: ProblemState, trails: [Vec<(i64, u64)>; 3]) -> bool {
-    let assignments: BTreeSet<i64> = BTreeSet::from_iter(
-        [trails[1].clone(), trails[2].clone()]
+fn verify_trail(problem_state: ProblemState, trails: [Vec<(isize, usize)>; 2]) -> bool {
+    let assignments: BTreeSet<isize> = BTreeSet::from_iter(
+        [trails[0].clone(), trails[1].clone()]
             .concat()
             .into_iter()
             .map(|x| x.0)
-            .collect::<Vec<i64>>(),
+            .collect::<Vec<isize>>(),
     );
 
     'outer: for (_, clause) in problem_state.clauses {
@@ -110,7 +113,7 @@ fn verify_trail(problem_state: ProblemState, trails: [Vec<(i64, u64)>; 3]) -> bo
 }
 
 // returns the first unit clause's literal, 0 if none
-fn find_unit(problem_state: &ProblemState) -> i64 {
+fn find_unit(problem_state: &ProblemState) -> isize {
     for (_, c) in problem_state.clauses.iter() {
         if c.len() == 1 {
             return *c.iter().next().unwrap();
@@ -120,7 +123,7 @@ fn find_unit(problem_state: &ProblemState) -> i64 {
 }
 
 // propagates a found unit literal; does not check for correctness but assumes unit, likely malfunctions if asked to propagate non-unit
-fn unit_propagate(l: i64, mut problem_state: ProblemState) -> ProblemState {
+fn unit_propagate(l: isize, problem_state: &mut ProblemState) {
     for cidx in problem_state.literals.get_mut(&l).cloned().unwrap() {
         let removed_clause = problem_state.clauses.remove(&cidx).unwrap();
         for literal in removed_clause {
@@ -140,11 +143,9 @@ fn unit_propagate(l: i64, mut problem_state: ProblemState) -> ProblemState {
 
     problem_state.trails[1].push((l, problem_state.depth));
     problem_state.depth += 1;
-
-    return problem_state;
 }
 
-fn find_pure(problem_state: &ProblemState) -> i64 {
+fn find_pure(problem_state: &ProblemState) -> isize {
     // returns the first pure literal, 0 if none
     for l in problem_state.literals.keys() {
         if problem_state.literals.get(&-l).unwrap().is_empty() {
@@ -155,7 +156,7 @@ fn find_pure(problem_state: &ProblemState) -> i64 {
 }
 
 // propagates a found pure literal; likely malfunctions in the same mode as unit_propagate
-fn pure_propagate(l: i64, mut problem_state: ProblemState) -> ProblemState {
+fn pure_propagate(l: isize, problem_state: &mut ProblemState) {
     for lc in [l, -l] {
         {
             for cidx in problem_state.literals.get_mut(&lc).cloned().unwrap() {
@@ -172,35 +173,20 @@ fn pure_propagate(l: i64, mut problem_state: ProblemState) -> ProblemState {
         }
     }
 
-    problem_state.trails[2].push((l, problem_state.depth));
+    problem_state.trails[0].push((l, problem_state.depth));
     problem_state.depth += 1;
-
-    return problem_state;
 }
 
 // baseline literal decision, returns the next literal in the BTreeSet's (deterministic but arbitrary) iterator
-fn next_literal(problem_state: ProblemState) -> (ProblemState, i64) {
+fn next_literal(problem_state: &ProblemState) -> isize {
     let literal = &problem_state.literals.keys().next().unwrap().clone();
-    (problem_state, *literal)
-}
-
-// literal that occurs in the most clauses
-fn maximum_occurence(problem_state: ProblemState) -> (ProblemState, i64) {
-    let (mut max, mut max_literal) = (0, 0);
-
-    for literal in problem_state.literals.keys() {
-        let literal_clause_count = problem_state.literals.get(literal).iter().len();
-        if literal_clause_count > max {
-            (max, max_literal) = (literal_clause_count, *literal);
-        }
-    }
-    (problem_state, max_literal)
+    *literal
 }
 
 // maximum occurence of minimum size
-fn moms(problem_state: ProblemState) -> (ProblemState, i64) {
+fn moms(problem_state: &ProblemState) -> isize {
     let mut min_length = *&problem_state.clauses.iter().next().unwrap().1.len();
-    let mut smallest_clauses: Vec<u64> = vec![];
+    let mut smallest_clauses: Vec<usize> = vec![];
 
     for clause in &problem_state.clauses {
         let clause_len = clause.1.len();
@@ -213,7 +199,7 @@ fn moms(problem_state: ProblemState) -> (ProblemState, i64) {
         }
     }
 
-    let mut literal_counts: BTreeMap<i64, u64> = BTreeMap::new();
+    let mut literal_counts: BTreeMap<isize, usize> = BTreeMap::new();
     for cindex in smallest_clauses {
         for literal in problem_state.clauses.get(&cindex).unwrap() {
             if !literal_counts.contains_key(literal) {
@@ -231,38 +217,28 @@ fn moms(problem_state: ProblemState) -> (ProblemState, i64) {
         }
     }
 
-    (problem_state, max_literal)
+    max_literal
 }
 
-const DEPTH_LIMIT: u64 = 0;
-
 struct DPLL {
-    nodes: Arc<Mutex<u64>>,
-    max_depth: Arc<Mutex<u64>>,
+    nodes: AtomicUsize,
 
-    heuristic: fn(ProblemState) -> (ProblemState, i64),
+    sat_found: AtomicBool,
+
+    heuristic: fn(&ProblemState) -> isize,
 }
 
 impl DPLL {
     fn dpll(&self, mut problem_state: ProblemState) -> (bool, ProblemState) {
-        if DEPTH_LIMIT != 0 {
-            if problem_state.depth > DEPTH_LIMIT {
-                return (false, problem_state);
-            }
+        if self.sat_found.load(Relaxed) {
+            return (false, problem_state);
         }
 
-        *self.nodes.lock().unwrap() += 1;
+        self.nodes.fetch_add(1, Relaxed);
 
-        print!(
-            "\rNodes explored: {}, Max depth reached: {} ",
-            *self.nodes.lock().unwrap(),
-            *self.max_depth.lock().unwrap()
-        );
+        print!("\rNodes explored: {}", self.nodes.load(Relaxed),);
 
         problem_state.depth += 1;
-        if problem_state.depth > *self.max_depth.lock().unwrap() {
-            *self.max_depth.lock().unwrap() = problem_state.depth;
-        }
 
         loop {
             let unit = find_unit(&problem_state);
@@ -270,7 +246,7 @@ impl DPLL {
                 break;
             }
 
-            problem_state = unit_propagate(unit, problem_state);
+            unit_propagate(unit, &mut problem_state);
         }
 
         loop {
@@ -279,34 +255,33 @@ impl DPLL {
                 break;
             }
 
-            problem_state = pure_propagate(pure, problem_state);
+            pure_propagate(pure, &mut problem_state);
         }
 
         if problem_state.clauses.is_empty() {
-            // println!("{:?}", (problem.decision_trail, problem.unit_trail, problem.pure_trail));
+            self.sat_found.store(true, Relaxed);
             return (true, problem_state);
         }
         for (_, c) in &problem_state.clauses {
             if c.is_empty() {
-                // println!("{:?}", (problem.decision_trail, problem.unit_trail, problem.pure_trail));
                 return (false, problem_state);
             }
         }
 
-        let (problem, l) = (self.heuristic)(problem_state);
+        let l = (self.heuristic)(&problem_state);
 
-        // self.pool.join(oper_a, oper_b);
+        let solve_branch = |sign: isize| {
+            let l = l * sign;
+            let mut problem_clone = problem_state.clone();
+            problem_clone.insert_clause(BTreeSet::from_iter(vec![l]));
+            self.dpll(problem_clone)
+        };
 
-        let results: Vec<(bool, ProblemState)> = [1, -1]
-            .into_par_iter()
-            .map(|sign| {
-                let l = l * sign;
-                let mut problem_clone = problem.clone();
-                problem_clone.insert_clause(BTreeSet::from_iter(vec![l]));
-                problem_clone.trails[0].push((l, problem.depth));
-                self.dpll(problem_clone)
-            })
-            .collect::<Vec<(bool, ProblemState)>>();
+        let results: Vec<(bool, ProblemState)> = if problem_state.depth <= 1000 {
+            [1, -1].into_par_iter().map(solve_branch).collect()
+        } else {
+            [1, -1].into_iter().map(solve_branch).collect()
+        };
 
         if results.clone()[0].0 {
             return results[0].clone();
@@ -316,61 +291,55 @@ impl DPLL {
     }
 }
 
-fn go_over_all_problems() {
-    for heuristic in [moms, maximum_occurence, next_literal] {
-        for num_threads in 10..=10 {
-            let mut wtr = csv::Writer::from_writer(io::stdout());
-            let _ = wtr.write_record([
-                "problem_name",
-                "vars",
-                "clauses",
-                "decision_type",
-                "max_depth",
-                "num_nodes",
-                "duration_ms",
-            ]);
+fn benchmark_problemsets(
+    p_sets: Vec<&str>,
+    heuristics: Vec<fn(&ProblemState) -> isize>,
+    heur_names: Vec<&str>,
+    nums_threads: Vec<usize>,
+) {
+    let mut wtr = csv::Writer::from_path(format!(
+        "{:?}_{:?}_{:?}_results.csv",
+        p_sets, heur_names, nums_threads
+    ))
+    .unwrap();
+    let _ = wtr.write_record([
+        "problem_name",
+        "vars",
+        "clauses",
+        "decision_type",
+        "num_threads",
+        "num_nodes",
+        "duration_mus",
+    ]);
 
+    for (heuristic, heur_name) in heuristics.into_iter().zip(heur_names) {
+        for num_threads in nums_threads.iter() {
             rayon::ThreadPoolBuilder::new()
-                .num_threads(num_threads)
-                .build_global()
+                .num_threads(*num_threads)
+                .build()
                 .unwrap();
 
-            let problem_sets = fs::read_dir("problem_sets").unwrap();
-            for problem_set in problem_sets {
-                if vec![
-                    "uf20-91",
-                    "uf150-645",
-                    "uf200-860",
-                    // "uf250-1065",
-                    "uf125-538",
-                    "BMS_k3_n100_m429",
-                    "uf50-218",
-                    "uf100-430",
-                    "uf225-960",
-                ]
-                .contains(&problem_set.as_ref().unwrap().file_name().to_str().unwrap())
-                {
-                    continue;
-                } //
-
-                let problem_set = fs::read_dir(problem_set.unwrap().path()).unwrap();
+            for problem_set in p_sets.iter() {
+                let problem_set = fs::read_dir(format!("problem_sets/{}", problem_set)).unwrap();
                 println!("Problem set {:?}", problem_set);
 
                 for problem in problem_set {
                     let start_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
                     let dpll = DPLL {
-                        max_depth: Arc::new(Mutex::new(0)),
-                        nodes: Arc::new(Mutex::new(0)),
+                        nodes: AtomicUsize::new(0),
+
+                        sat_found: AtomicBool::new(false),
 
                         heuristic: heuristic,
                     };
 
                     let problem_file = problem.unwrap().path();
                     print!("{:?}: \n", problem_file);
-                    let problem = read_cnf(problem_file.to_str().unwrap());
+                    let (problem, num_vars, num_clauses) = read_cnf(problem_file.to_str().unwrap());
 
                     let (sat, dpll_result) = dpll.dpll(problem.clone());
+
                     if sat {
                         let verification = verify_trail(problem, dpll_result.trails);
 
@@ -380,7 +349,20 @@ fn go_over_all_problems() {
                     }
 
                     let end_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                    print!(" {:?}ms\n", end_time.as_millis() - start_time.as_millis());
+                    let duration = (end_time - start_time).as_micros();
+                    print!(" {:?}mus\n", duration);
+
+                    let _ = wtr.write_record([
+                        problem_file.file_name().unwrap().to_str().unwrap(),
+                        &num_vars.to_string(),
+                        &num_clauses.to_string(),
+                        heur_name,
+                        &num_threads.to_string(),
+                        &dpll.nodes.load(Relaxed).to_string(),
+                        &duration.to_string(),
+                    ]);
+
+                    let _ = wtr.flush();
                 }
             }
         }
@@ -388,5 +370,12 @@ fn go_over_all_problems() {
 }
 
 fn main() {
-    go_over_all_problems();
+    // benchmark_problemsets(vec!["f"], vec![moms], vec!["MOMS"], vec![12]);
+    // benchmark_problemsets(vec!["uf20-91", "uf50-218", "uf75-325", "uf100-430", "uf125-538", "uf150-645", "uf175-753"], vec![moms, next_literal], vec!["MOMS", "arbitrary"], vec![12, 10, 8, 6, 4, 2, 1]);
+    benchmark_problemsets(
+        vec!["uf225-960"],
+        vec![moms],
+        vec!["MOMS"],
+        vec![12],
+    );
 }
