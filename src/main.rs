@@ -270,18 +270,14 @@ impl DPLL {
 
         let l = (self.heuristic)(&problem_state);
 
-        let solve_branch = |sign: isize| {
+
+        let results: Vec<(bool, ProblemState)> = [1, -1].into_par_iter().map( |sign: isize| {
             let l = l * sign;
             let mut problem_clone = problem_state.clone();
             problem_clone.insert_clause(BTreeSet::from_iter(vec![l]));
             self.dpll(problem_clone)
-        };
-
-        let results: Vec<(bool, ProblemState)> = if problem_state.depth <= 1000 {
-            [1, -1].into_par_iter().map(solve_branch).collect()
-        } else {
-            [1, -1].into_iter().map(solve_branch).collect()
-        };
+        }).collect();
+        
 
         if results.clone()[0].0 {
             return results[0].clone();
