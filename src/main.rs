@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering::{Relaxed, SeqCst};
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{fs, io};
+use std::{fs, io, ops};
 
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
@@ -24,6 +24,10 @@ impl ProblemState {
     // dynamic insertion of clauses; not meaningful if cdcl is not implemented
     fn insert_clause(&mut self, clause: BTreeSet<isize>) {
         for var in &clause {
+            if !self.literals.contains_key(var) {
+                continue;
+            }
+
             self.literals
                 .get_mut(var)
                 .unwrap()
@@ -183,6 +187,56 @@ fn next_literal(problem_state: &ProblemState) -> isize {
     *literal
 }
 
+struct ParametrizedMoms<const K: usize> {
+    function: fn(problem_state: &ProblemState) -> isize,
+}
+
+impl<const K: usize> ParametrizedMoms<K> {
+    fn parametrized_moms(problem_state: &ProblemState) -> isize {
+        let mut min_length = *&problem_state.clauses.iter().next().unwrap().1.len();
+        let mut smallest_clauses: Vec<usize> = vec![];
+
+        for clause in &problem_state.clauses {
+            let clause_len = clause.1.len();
+            if clause_len <= min_length {
+                if clause_len < min_length {
+                    smallest_clauses.clear();
+                    min_length = clause_len;
+                }
+                smallest_clauses.push(*clause.0);
+            }
+        }
+
+        let mut literal_counts: BTreeMap<isize, usize> = BTreeMap::new();
+        for cindex in smallest_clauses {
+            for literal in problem_state.clauses.get(&cindex).unwrap() {
+                if !literal_counts.contains_key(literal) {
+                    literal_counts.insert(*literal, 0);
+                }
+                *literal_counts.get_mut(literal).unwrap() += 1;
+            }
+        }
+
+        let (mut max_literal, mut max) = (0, 0);
+
+        for (literal, f_x) in &literal_counts {
+            let f_notx = if literal_counts.contains_key(&-literal) {
+                *literal_counts.get(&-literal).unwrap()
+            } else {
+                0
+            };
+
+            let score = (f_x + f_notx) * 2_usize.pow(K as u32) + (f_x * f_notx);
+
+            if score > max {
+                (max_literal, max) = (*literal, score)
+            }
+        }
+
+        max_literal
+    }
+}
+
 // maximum occurence of minimum size
 fn moms(problem_state: &ProblemState) -> isize {
     let mut min_length = *&problem_state.clauses.iter().next().unwrap().1.len();
@@ -270,14 +324,15 @@ impl DPLL {
 
         let l = (self.heuristic)(&problem_state);
 
-
-        let results: Vec<(bool, ProblemState)> = [1, -1].into_par_iter().map( |sign: isize| {
-            let l = l * sign;
-            let mut problem_clone = problem_state.clone();
-            problem_clone.insert_clause(BTreeSet::from_iter(vec![l]));
-            self.dpll(problem_clone)
-        }).collect();
-        
+        let results: Vec<(bool, ProblemState)> = [1, -1]
+            .into_par_iter()
+            .map(|sign: isize| {
+                let l = l * sign;
+                let mut problem_clone = problem_state.clone();
+                problem_clone.insert_clause(BTreeSet::from_iter(vec![l]));
+                self.dpll(problem_clone)
+            })
+            .collect();
 
         if results.clone()[0].0 {
             return results[0].clone();
@@ -365,13 +420,51 @@ fn benchmark_problemsets(
     }
 }
 
+fn benchmark_k() {
+    macro_rules! benchmark_k {
+        ($k: expr) => {
+            benchmark_problemsets(
+                vec![
+                    // "uf175-753",
+                    // "uf200-860",
+                    // "uf225-960",
+                    "uf250-1065"
+                ],
+                vec![ParametrizedMoms::<$k>::parametrized_moms],
+                vec![&format!("MOMS_{}", $k)],
+                vec![12],
+            );
+        };
+    }
+
+    const K1: usize = 1;
+    benchmark_k!(K1);
+    const K2: usize = 2;
+    benchmark_k!(K2);
+    const K3: usize = 3;
+    benchmark_k!(K3);
+    const K4: usize = 4;
+    benchmark_k!(K4);
+    const K5: usize = 5;
+    benchmark_k!(K5);
+    const K8: usize = 8;
+    benchmark_k!(K8);
+    const K10: usize = 10;
+    benchmark_k!(K10);
+    const K15: usize = 15;
+    benchmark_k!(K15);
+    const K20: usize = 20;
+    benchmark_k!(K20);
+}
+
 fn main() {
     // benchmark_problemsets(vec!["f"], vec![moms], vec!["MOMS"], vec![12]);
-    // benchmark_problemsets(vec!["uf20-91", "uf50-218", "uf75-325", "uf100-430", "uf125-538", "uf150-645", "uf175-753"], vec![moms, next_literal], vec!["MOMS", "arbitrary"], vec![12, 10, 8, 6, 4, 2, 1]);
-    benchmark_problemsets(
-        vec!["uf225-960"],
-        vec![moms],
-        vec!["MOMS"],
-        vec![12],
-    );
+    benchmark_k();
+    // benchmark_problemsets(vec!["uf20-91", "uf50-218", "uf75-325", "uf100-430", "uf125-538", "uf150-645", "uf175-753"], vec![moms, parametrized_moms, next_literal], vec!["MOMS", "MOMS_K", "arbitrary"], vec![12, 10, 8, 6, 4, 2, 1]);
+    // benchmark_problemsets(
+    //     vec!["uf250-1065"],
+    //     vec![moms2],
+    //     vec!["MOMS2"],
+    //     vec![12],
+    // );
 }
