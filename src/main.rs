@@ -283,6 +283,16 @@ struct DPLL {
 }
 
 impl DPLL {
+    fn new(heuristic: fn(&ProblemState) -> isize) -> Self {
+        DPLL {
+            nodes: AtomicUsize::new(0),
+
+            sat_found: AtomicBool::new(false),
+
+            heuristic: heuristic,
+        }
+    }
+
     fn dpll(&self, mut problem_state: ProblemState) -> (bool, ProblemState) {
         if self.sat_found.load(Relaxed) {
             return (false, problem_state);
@@ -377,13 +387,7 @@ fn benchmark_problemsets(
                 for problem in problem_set {
                     let start_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
-                    let dpll = DPLL {
-                        nodes: AtomicUsize::new(0),
-
-                        sat_found: AtomicBool::new(false),
-
-                        heuristic: heuristic,
-                    };
+                    let dpll = DPLL::new(heuristic);
 
                     let problem_file = problem.unwrap().path();
                     print!("{:?}: \n", problem_file);
@@ -428,7 +432,7 @@ fn benchmark_k() {
                     // "uf175-753",
                     // "uf200-860",
                     // "uf225-960",
-                    "uf250-1065"
+                    "uf250-1065",
                 ],
                 vec![ParametrizedMoms::<$k>::parametrized_moms],
                 vec![&format!("MOMS_{}", $k)],
@@ -457,9 +461,28 @@ fn benchmark_k() {
     benchmark_k!(K20);
 }
 
+fn time_problem(file_path: &str) {
+    let start_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+
+    let (problem, _, _) = read_cnf(file_path);
+    let dpll = DPLL::new(ParametrizedMoms::<4>::parametrized_moms);
+    let (sat, dpll_result) = dpll.dpll(problem.clone());
+
+    if sat {
+        let verification = verify_trail(problem, dpll_result.trails);
+
+        print!("{:?}", verification);
+    } else {
+        println!("claimed not sat");
+    }
+
+    let end_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    println!("{:?}", (end_time - start_time).as_secs());
+}
+
 fn main() {
     // benchmark_problemsets(vec!["f"], vec![moms], vec!["MOMS"], vec![12]);
-    benchmark_k();
+    // benchmark_k();
     // benchmark_problemsets(vec!["uf20-91", "uf50-218", "uf75-325", "uf100-430", "uf125-538", "uf150-645", "uf175-753"], vec![moms, parametrized_moms, next_literal], vec!["MOMS", "MOMS_K", "arbitrary"], vec![12, 10, 8, 6, 4, 2, 1]);
     // benchmark_problemsets(
     //     vec!["uf250-1065"],
@@ -467,4 +490,6 @@ fn main() {
     //     vec!["MOMS2"],
     //     vec![12],
     // );
+
+    time_problem("problem_sets/f/f600.cnf");
 }
