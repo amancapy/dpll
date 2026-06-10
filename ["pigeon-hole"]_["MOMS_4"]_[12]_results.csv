@@ -1,0 +1,6 @@
+problem_name,vars,clauses,decision_type,num_threads,num_nodes,duration_mus
+hole9.cnf,90,415,MOMS_4,12,725759,1780808
+hole8.cnf,72,297,MOMS_4,12,80639,169545
+hole10.cnf,110,561,MOMS_4,12,7257599,17817469
+hole7.cnf,56,204,MOMS_4,12,10079,42210
+hole6.cnf,42,133,MOMS_4,12,1439,6518

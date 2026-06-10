@@ -491,5 +491,8 @@ fn main() {
     //     vec![12],
     // );
 
-    time_problem("problem_sets/f/f600.cnf");
+    // time_problem("problem_sets/f/f600.cnf");
+    // benchmark_problemsets(vec!["pigeon-hole"], vec![ParametrizedMoms::<4>::parametrized_moms], vec!["MOMS_4"], vec![12]);
+    // benchmark_problemsets(vec!["aim"], vec![ParametrizedMoms::<4>::parametrized_moms], vec!["MOMS_4"], vec![12]);
+
 }

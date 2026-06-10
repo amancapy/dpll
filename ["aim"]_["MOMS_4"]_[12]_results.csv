@@ -1,0 +1,6 @@
+problem_name,vars,clauses,decision_type,num_threads,num_nodes,duration_mus
+aim-50-1_6-yes1-3.cnf,50,80,MOMS_4,12,26,817
+aim-50-6_0-yes1-4.cnf,50,300,MOMS_4,12,19,772
+aim-100-6_0-yes1-3.cnf,100,600,MOMS_4,12,35,2404
+aim-50-2_0-no-4.cnf,50,100,MOMS_4,12,9929,20709
+aim-100-2_0-yes1-2.cnf,100,200,MOMS_4,12,96,2224
